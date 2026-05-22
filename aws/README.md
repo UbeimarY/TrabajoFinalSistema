@@ -1,54 +1,60 @@
 # AWS CLI v2
 
-This bundle contains a built executable of the AWS CLI v2.
+Este paquete contiene un ejecutable compilado de AWS CLI v2.
 
-## Installation
+## Instalación
 
-To install the AWS CLI v2, run the `install` script:
+Para instalar AWS CLI v2, ejecuta el script `install`:
+
+```bash
+$ sudo ./install
+Ahora puedes ejecutar: /usr/local/bin/aws --version
 ```
-$ sudo ./install 
-You can now run: /usr/local/bin/aws --version
-```
-This will install the AWS CLI v2 at `/usr/local/bin/aws`.  Assuming
-`/usr/local/bin` is on your `PATH`, you can now run:
-```
+
+Esto instalará AWS CLI v2 en `/usr/local/bin/aws`. Suponiendo que
+`/usr/local/bin` esté en tu variable `PATH`, ahora puedes ejecutar:
+
+```bash
 $ aws --version
 ```
 
+### Instalación sin sudo
 
-### Installing without sudo
+Si no tienes permisos de `sudo` o deseas instalar AWS
+CLI v2 solo para el usuario actual, ejecuta el script `install` con las opciones `-b`
+y `-i`:
 
-If you don't have ``sudo`` permissions or want to install the AWS
-CLI v2 only for the current user, run the `install` script with the `-b`
-and `-i` options:
-```
+```bash
 $ ./install -i ~/.local/aws-cli -b ~/.local/bin
-``` 
-This will install the AWS CLI v2 in `~/.local/aws-cli` and create
-symlinks for `aws` and `aws_completer` in `~/.local/bin`. For more
-information about these options, run the `install` script with `-h`:
 ```
+
+Esto instalará AWS CLI v2 en `~/.local/aws-cli` y creará
+enlaces simbólicos para `aws` y `aws_completer` en `~/.local/bin`. Para más
+información sobre estas opciones, ejecuta el script `install` con `-h`:
+
+```bash
 $ ./install -h
 ```
 
-### Updating
+### Actualización
 
-If you run the `install` script and there is a previously installed version
-of the AWS CLI v2, the script will error out. To update to the version included
-in this bundle, run the `install` script with `--update`:
-```
+Si ejecutas el script `install` y ya existe una versión previamente instalada
+de AWS CLI v2, el script mostrará un error. Para actualizar a la versión incluida
+en este paquete, ejecuta el script `install` con `--update`:
+
+```bash
 $ sudo ./install --update
 ```
 
+### Eliminar la instalación
 
-### Removing the installation
+Para eliminar AWS CLI v2, elimina la instalación y los enlaces simbólicos:
 
-To remove the AWS CLI v2, delete the its installation and symlinks:
-```
+```bash
 $ sudo rm -rf /usr/local/aws-cli
 $ sudo rm /usr/local/bin/aws
 $ sudo rm /usr/local/bin/aws_completer
 ```
-Note if you installed the AWS CLI v2 using the `-b` or `-i` options, you will
-need to remove the installation and the symlinks in the directories you
-specified.
+
+Nota: si instalaste AWS CLI v2 usando las opciones `-b` o `-i`, también necesitarás
+eliminar la instalación y los enlaces simbólicos en los directorios que especificaste.
