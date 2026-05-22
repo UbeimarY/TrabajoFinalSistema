@@ -1,0 +1,16 @@
+listeners.tcp = none
+listeners.ssl.default = 5672
+
+ssl_options.cacertfile = /etc/rabbitmq/certs/ca.crt
+ssl_options.certfile = /etc/rabbitmq/certs/server.crt
+ssl_options.keyfile = /etc/rabbitmq/certs/server.key
+ssl_options.verify = verify_none
+ssl_options.fail_if_no_peer_cert = false
+
+auth_backends.1 = oauth2
+
+oauth2.resource_server_id = rabbitmq
+oauth2.issuer = https://{{ vm_auth_ip }}
+oauth2.jwks_url = https://{{ vm_auth_ip }}/.well-known/jwks.json
+oauth2.verify_aud = true
+

@@ -1,0 +1,13 @@
+[Unit]
+After=docker.service
+Requires=docker.service
+
+[Service]
+ExecStart=/usr/bin/docker run --rm --name rabbitmq --network host -v /opt/zero-trust/rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro -v /opt/zero-trust/rabbitmq/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro -v /opt/zero-trust/rabbitmq/certs:/etc/rabbitmq/certs:ro rabbitmq:4.1-alpine
+ExecStop=/usr/bin/docker stop rabbitmq
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+

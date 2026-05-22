@@ -1,0 +1,14 @@
+[Unit]
+After=docker.service
+Requires=docker.service
+
+[Service]
+EnvironmentFile=/opt/zero-trust/kafka/kafka.env
+ExecStart=/usr/bin/docker run --rm --name kafka --network host -v /opt/zero-trust/kafka/config:/mnt/shared/config:ro -v /opt/zero-trust/kafka/secrets:/etc/kafka/secrets:ro -v /opt/zero-trust/kafka/data:/var/lib/kafka/data apache/kafka:latest
+ExecStop=/usr/bin/docker stop kafka
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+

@@ -1,0 +1,23 @@
+flush ruleset
+
+table inet filter {
+  chain input {
+    type filter hook input priority 0; policy drop;
+    iif "lo" accept
+    ct state established,related accept
+    tcp dport 22 ip saddr { {{ admin_cidr }}, 10.10.0.0/16 } accept
+    tcp dport 443 ip saddr { {{ hostvars['vm-init'].private_ip }}, {{ hostvars['vm-api'].private_ip }}, {{ hostvars['vm-core'].private_ip }}, {{ hostvars['vm-app'].private_ip }}, {{ hostvars['vm-brokers'].private_ip }} } accept
+  }
+
+  chain forward {
+    type filter hook forward priority 0; policy drop;
+  }
+
+  chain output {
+    type filter hook output priority 0; policy drop;
+    oif "lo" accept
+    ct state established,related accept
+    tcp dport { 80, 443 } accept
+  }
+}
+

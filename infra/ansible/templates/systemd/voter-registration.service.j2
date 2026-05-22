@@ -1,0 +1,11 @@
+[Unit]
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/docker run --rm --name voter-registration --network host --env-file /opt/zero-trust/services/voter-registration/service.env -v /opt/zero-trust/certs:/certs:ro zt/voter-registration-service:local
+
+[Install]
+WantedBy=multi-user.target
+

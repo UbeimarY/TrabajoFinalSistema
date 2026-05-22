@@ -1,0 +1,495 @@
+- name: Base system (Docker + nftables)
+  hosts: all
+  become: true
+  tasks:
+    - name: Install packages
+      ansible.builtin.apt:
+        update_cache: true
+        name:
+          - ca-certificates
+          - curl
+          - default-jre-headless
+          - docker.io
+          - git
+          - nftables
+          - openssl
+          - uuid-runtime
+        state: present
+
+    - name: Enable services
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        enabled: true
+        state: started
+      loop:
+        - docker
+        - nftables
+
+    - name: Create base directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      loop:
+        - /opt/zero-trust
+        - /opt/zero-trust/certs
+        - /opt/zero-trust/repo
+
+    - name: Clone repo
+      ansible.builtin.git:
+        repo: "{{ repo_url }}"
+        version: "{{ repo_ref }}"
+        dest: /opt/zero-trust/repo
+        force: true
+
+- name: Generate CA and auth keys (vm-auth)
+  hosts: vm_auth
+  become: true
+  tasks:
+    - name: Create auth directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      loop:
+        - /opt/zero-trust/auth
+        - /opt/zero-trust/auth/keys
+        - /opt/zero-trust/auth/tls
+        - /opt/zero-trust/certs/issued
+
+    - name: Generate CA key
+      ansible.builtin.command:
+        cmd: openssl genrsa -out /opt/zero-trust/certs/ca.key 4096
+        creates: /opt/zero-trust/certs/ca.key
+
+    - name: Generate CA cert
+      ansible.builtin.command:
+        cmd: openssl req -x509 -new -nodes -key /opt/zero-trust/certs/ca.key -sha256 -days 3650 -subj /CN=zt-ca -out /opt/zero-trust/certs/ca.crt
+        creates: /opt/zero-trust/certs/ca.crt
+
+    - name: Generate JWT keypair
+      ansible.builtin.command:
+        cmd: openssl genrsa -out /opt/zero-trust/auth/keys/jwt_private.pem 2048
+        creates: /opt/zero-trust/auth/keys/jwt_private.pem
+
+    - name: Derive JWT public key
+      ansible.builtin.command:
+        cmd: openssl rsa -in /opt/zero-trust/auth/keys/jwt_private.pem -pubout -out /opt/zero-trust/auth/keys/jwt_public.pem
+        creates: /opt/zero-trust/auth/keys/jwt_public.pem
+
+- name: Distribute CA cert
+  hosts: all
+  become: true
+  tasks:
+    - name: Copy CA cert from vm-auth
+      ansible.builtin.slurp:
+        src: /opt/zero-trust/certs/ca.crt
+      register: ca_cert_b64
+      delegate_to: vm-auth
+      run_once: true
+
+    - name: Write CA cert locally on each VM
+      ansible.builtin.copy:
+        dest: /opt/zero-trust/certs/ca.crt
+        content: "{{ ca_cert_b64.content | b64decode }}"
+        owner: root
+        group: root
+        mode: "0644"
+
+- name: Apply nftables policies
+  hosts: all
+  become: true
+  vars:
+    vm_auth_ip: "{{ hostvars['vm-auth'].private_ip }}"
+    vm_brokers_ip: "{{ hostvars['vm-brokers'].private_ip }}"
+    zt_zone: "{{ (group_names | intersect(['vm_auth','vm_brokers','vm_api','vm_init','vm_core','vm_app']))[0] }}"
+  tasks:
+    - name: Render nftables config
+      ansible.builtin.template:
+        src: "templates/nftables/{{ zt_zone }}.nft.j2"
+        dest: /etc/nftables.conf
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Reload nftables
+      ansible.builtin.systemd:
+        name: nftables
+        state: restarted
+
+- name: Deploy auth_server (vm-auth)
+  hosts: vm_auth
+  become: true
+  vars:
+    clients_json: >-
+      {"kafka-broker":{"secret":"change-me","scopes":["kafka:admin"]},"voting-api":{"secret":"change-me","scopes":["rabbitmq:rpc","kafka:produce"]},"voter-registration-service":{"secret":"change-me","scopes":["kafka:produce"]},"user-validation-service":{"secret":"change-me","scopes":["kafka:consume","rabbitmq:rpc"]}}
+  tasks:
+    - name: Issue TLS cert for vm-auth
+      ansible.builtin.command:
+        cmd: >
+          bash -lc "
+          openssl genrsa -out /opt/zero-trust/auth/tls/server.key 2048 &&
+          openssl req -new -key /opt/zero-trust/auth/tls/server.key -subj /CN={{ private_ip }} -out /opt/zero-trust/auth/tls/server.csr &&
+          openssl x509 -req -in /opt/zero-trust/auth/tls/server.csr -CA /opt/zero-trust/certs/ca.crt -CAkey /opt/zero-trust/certs/ca.key -CAcreateserial -out /opt/zero-trust/auth/tls/server.crt -days 365 -sha256 -extfile <(printf 'subjectAltName=IP:{{ private_ip }}')"
+        creates: /opt/zero-trust/auth/tls/server.crt
+
+    - name: Build auth-server image
+      ansible.builtin.command:
+        cmd: docker build -t zt/auth-server:local -f /opt/zero-trust/repo/apps/auth-server/Dockerfile /opt/zero-trust/repo
+
+    - name: Write auth-server env file
+      ansible.builtin.copy:
+        dest: /opt/zero-trust/auth/auth.env
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          PORT=443
+          TLS_CERT_PATH=/tls/server.crt
+          TLS_KEY_PATH=/tls/server.key
+          JWT_PRIVATE_KEY_PATH=/keys/jwt_private.pem
+          JWT_PUBLIC_KEY_PATH=/keys/jwt_public.pem
+          JWT_ISSUER=https://{{ private_ip }}
+          JWT_AUDIENCE=kafka,rabbitmq
+          JWT_TTL_SECONDS=300
+          JWT_KID=zt-key-1
+          CLIENTS_JSON='{{ clients_json }}'
+
+    - name: Install auth-server systemd unit
+      ansible.builtin.template:
+        src: templates/systemd/auth-server.service.j2
+        dest: /etc/systemd/system/auth-server.service
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: Start auth-server
+      ansible.builtin.systemd:
+        name: auth-server
+        enabled: true
+        state: restarted
+
+- name: Deploy brokers (vm-brokers)
+  hosts: vm_brokers
+  become: true
+  vars:
+    vm_auth_ip: "{{ hostvars['vm-auth'].private_ip }}"
+    kafka_keystore_password: changeit
+    kafka_truststore_password: changeit
+  tasks:
+    - name: Create brokers directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      loop:
+        - /opt/zero-trust/kafka
+        - /opt/zero-trust/kafka/config
+        - /opt/zero-trust/kafka/secrets
+        - /opt/zero-trust/kafka/data
+        - /opt/zero-trust/rabbitmq
+        - /opt/zero-trust/rabbitmq/certs
+
+    - name: Copy CA cert for RabbitMQ
+      ansible.builtin.copy:
+        src: /opt/zero-trust/certs/ca.crt
+        remote_src: true
+        dest: /opt/zero-trust/rabbitmq/certs/ca.crt
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Issue TLS cert for RabbitMQ
+      ansible.builtin.command:
+        cmd: >
+          bash -lc "
+          openssl genrsa -out /opt/zero-trust/rabbitmq/certs/server.key 2048 &&
+          openssl req -new -key /opt/zero-trust/rabbitmq/certs/server.key -subj /CN={{ private_ip }} -out /opt/zero-trust/rabbitmq/certs/server.csr &&
+          openssl x509 -req -in /opt/zero-trust/rabbitmq/certs/server.csr -CA /opt/zero-trust/certs/ca.crt -CAkey /opt/zero-trust/certs/ca.key -CAcreateserial -out /opt/zero-trust/rabbitmq/certs/server.crt -days 365 -sha256 -extfile <(printf 'subjectAltName=IP:{{ private_ip }}')"
+        creates: /opt/zero-trust/rabbitmq/certs/server.crt
+
+    - name: Render RabbitMQ config
+      ansible.builtin.template:
+        src: templates/rabbitmq/rabbitmq.conf.j2
+        dest: /opt/zero-trust/rabbitmq/rabbitmq.conf
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Copy enabled plugins
+      ansible.builtin.copy:
+        src: templates/rabbitmq/enabled_plugins
+        dest: /opt/zero-trust/rabbitmq/enabled_plugins
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Install rabbitmq systemd unit
+      ansible.builtin.template:
+        src: templates/systemd/rabbitmq.service.j2
+        dest: /etc/systemd/system/rabbitmq.service
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Render Kafka server.properties
+      ansible.builtin.template:
+        src: templates/kafka/server.properties.j2
+        dest: /opt/zero-trust/kafka/config/server.properties
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Generate Kafka TLS keypair and PKCS12 keystore
+      ansible.builtin.command:
+        cmd: >
+          bash -lc "
+          openssl genrsa -out /opt/zero-trust/kafka/secrets/kafka.key 2048 &&
+          openssl req -new -key /opt/zero-trust/kafka/secrets/kafka.key -subj /CN={{ private_ip }} -out /opt/zero-trust/kafka/secrets/kafka.csr &&
+          openssl x509 -req -in /opt/zero-trust/kafka/secrets/kafka.csr -CA /opt/zero-trust/certs/ca.crt -CAkey /opt/zero-trust/certs/ca.key -CAcreateserial -out /opt/zero-trust/kafka/secrets/kafka.crt -days 365 -sha256 -extfile <(printf 'subjectAltName=IP:{{ private_ip }}') &&
+          openssl pkcs12 -export -in /opt/zero-trust/kafka/secrets/kafka.crt -inkey /opt/zero-trust/kafka/secrets/kafka.key -out /opt/zero-trust/kafka/secrets/kafka.keystore.p12 -name kafka -passout pass:{{ kafka_keystore_password }} "
+        creates: /opt/zero-trust/kafka/secrets/kafka.keystore.p12
+
+    - name: Generate Kafka truststore (JKS)
+      ansible.builtin.command:
+        cmd: >
+          bash -lc "
+          keytool -importcert -noprompt -alias zt-ca -file /opt/zero-trust/certs/ca.crt -keystore /opt/zero-trust/kafka/secrets/kafka.truststore.jks -storepass {{ kafka_truststore_password }} "
+        creates: /opt/zero-trust/kafka/secrets/kafka.truststore.jks
+
+    - name: Generate cluster id file
+      ansible.builtin.command:
+        cmd: bash -lc "test -f /opt/zero-trust/kafka/cluster_id || uuidgen > /opt/zero-trust/kafka/cluster_id"
+
+    - name: Read cluster id
+      ansible.builtin.command:
+        cmd: cat /opt/zero-trust/kafka/cluster_id
+      register: kafka_cluster_id
+      changed_when: false
+
+    - name: Write Kafka env file
+      ansible.builtin.copy:
+        dest: /opt/zero-trust/kafka/kafka.env
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          CLUSTER_ID={{ kafka_cluster_id.stdout }}
+
+    - name: Install kafka systemd unit
+      ansible.builtin.template:
+        src: templates/systemd/kafka.service.j2
+        dest: /etc/systemd/system/kafka.service
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: Start Kafka
+      ansible.builtin.systemd:
+        name: kafka
+        enabled: true
+        state: restarted
+
+    - name: Start RabbitMQ
+      ansible.builtin.systemd:
+        name: rabbitmq
+        enabled: true
+        state: restarted
+
+- name: Deploy voting_api (vm-api)
+  hosts: vm_api
+  become: true
+  vars:
+    vm_auth_ip: "{{ hostvars['vm-auth'].private_ip }}"
+    vm_brokers_ip: "{{ hostvars['vm-brokers'].private_ip }}"
+    voting_api_client_secret: change-me
+  tasks:
+    - name: Create voting-api directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      loop:
+        - /opt/zero-trust/services
+        - /opt/zero-trust/services/voting-api
+        - /opt/zero-trust/services/voting-api/tls
+
+    - name: Issue TLS cert for voting-api
+      ansible.builtin.command:
+        cmd: >
+          bash -lc "
+          openssl genrsa -out /opt/zero-trust/services/voting-api/tls/server.key 2048 &&
+          openssl req -new -key /opt/zero-trust/services/voting-api/tls/server.key -subj /CN={{ private_ip }} -out /opt/zero-trust/services/voting-api/tls/server.csr &&
+          openssl x509 -req -in /opt/zero-trust/services/voting-api/tls/server.csr -CA /opt/zero-trust/certs/ca.crt -CAkey /opt/zero-trust/certs/ca.key -CAcreateserial -out /opt/zero-trust/services/voting-api/tls/server.crt -days 365 -sha256 -extfile <(printf 'subjectAltName=IP:{{ private_ip }}')"
+        creates: /opt/zero-trust/services/voting-api/tls/server.crt
+
+    - name: Build voting-api image
+      ansible.builtin.command:
+        cmd: docker build -t zt/voting-api:local -f /opt/zero-trust/repo/apps/voting-api/Dockerfile /opt/zero-trust/repo
+
+    - name: Write voting-api env file
+      ansible.builtin.copy:
+        dest: /opt/zero-trust/services/voting-api/service.env
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          PORT=443
+          TLS_CERT_PATH=/tls/server.crt
+          TLS_KEY_PATH=/tls/server.key
+          AUTH_BASE_URL=https://{{ vm_auth_ip }}
+          CLIENT_ID=voting-api
+          CLIENT_SECRET={{ voting_api_client_secret }}
+          AUTH_TLS_CA_PATH=/certs/ca.crt
+          KAFKA_BROKERS={{ vm_brokers_ip }}:9092
+          KAFKA_TLS_CA_PATH=/certs/ca.crt
+          RABBIT_HOST={{ vm_brokers_ip }}
+          RABBIT_PORT=5672
+          RABBIT_TLS_CA_PATH=/certs/ca.crt
+
+    - name: Install voting-api systemd unit
+      ansible.builtin.template:
+        src: templates/systemd/voting-api.service.j2
+        dest: /etc/systemd/system/voting-api.service
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: Start voting-api
+      ansible.builtin.systemd:
+        name: voting-api
+        enabled: true
+        state: restarted
+
+- name: Deploy voter_registration_service (vm-init)
+  hosts: vm_init
+  become: true
+  vars:
+    vm_auth_ip: "{{ hostvars['vm-auth'].private_ip }}"
+    vm_brokers_ip: "{{ hostvars['vm-brokers'].private_ip }}"
+    voter_registration_client_secret: change-me
+  tasks:
+    - name: Create voter-registration directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      loop:
+        - /opt/zero-trust/services
+        - /opt/zero-trust/services/voter-registration
+
+    - name: Build voter-registration image
+      ansible.builtin.command:
+        cmd: docker build -t zt/voter-registration-service:local -f /opt/zero-trust/repo/apps/voter-registration-service/Dockerfile /opt/zero-trust/repo
+
+    - name: Write voter-registration env file
+      ansible.builtin.copy:
+        dest: /opt/zero-trust/services/voter-registration/service.env
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          AUTH_BASE_URL=https://{{ vm_auth_ip }}
+          CLIENT_ID=voter-registration-service
+          CLIENT_SECRET={{ voter_registration_client_secret }}
+          AUTH_TLS_CA_PATH=/certs/ca.crt
+          KAFKA_BROKERS={{ vm_brokers_ip }}:9092
+          KAFKA_TLS_CA_PATH=/certs/ca.crt
+          SEED_COUNT=50
+
+    - name: Install voter-registration systemd unit
+      ansible.builtin.template:
+        src: templates/systemd/voter-registration.service.j2
+        dest: /etc/systemd/system/voter-registration.service
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: Run voter-registration once
+      ansible.builtin.systemd:
+        name: voter-registration
+        state: restarted
+
+- name: Deploy user_validation_service (vm-core)
+  hosts: vm_core
+  become: true
+  vars:
+    vm_auth_ip: "{{ hostvars['vm-auth'].private_ip }}"
+    vm_brokers_ip: "{{ hostvars['vm-brokers'].private_ip }}"
+    user_validation_client_secret: change-me
+  tasks:
+    - name: Create user-validation directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      loop:
+        - /opt/zero-trust/services
+        - /opt/zero-trust/services/user-validation-service
+
+    - name: Build user-validation image
+      ansible.builtin.command:
+        cmd: docker build -t zt/user-validation-service:local -f /opt/zero-trust/repo/apps/user-validation-service/Dockerfile /opt/zero-trust/repo
+
+    - name: Write user-validation env file
+      ansible.builtin.copy:
+        dest: /opt/zero-trust/services/user-validation-service/service.env
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          AUTH_BASE_URL=https://{{ vm_auth_ip }}
+          CLIENT_ID=user-validation-service
+          CLIENT_SECRET={{ user_validation_client_secret }}
+          AUTH_TLS_CA_PATH=/certs/ca.crt
+          KAFKA_BROKERS={{ vm_brokers_ip }}:9092
+          KAFKA_TLS_CA_PATH=/certs/ca.crt
+          RABBIT_HOST={{ vm_brokers_ip }}
+          RABBIT_PORT=5672
+          RABBIT_TLS_CA_PATH=/certs/ca.crt
+
+    - name: Install user-validation systemd unit
+      ansible.builtin.template:
+        src: templates/systemd/user-validation.service.j2
+        dest: /etc/systemd/system/user-validation-service.service
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: Start user-validation-service
+      ansible.builtin.systemd:
+        name: user-validation-service
+        enabled: true
+        state: restarted

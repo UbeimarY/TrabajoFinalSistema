@@ -1,0 +1,14 @@
+[Unit]
+After=docker.service
+Requires=docker.service
+
+[Service]
+EnvironmentFile=/opt/zero-trust/auth/auth.env
+ExecStart=/usr/bin/docker run --rm --name auth-server --network host -v /opt/zero-trust/auth/keys:/keys:ro -v /opt/zero-trust/auth/tls:/tls:ro zt/auth-server:local
+ExecStop=/usr/bin/docker stop auth-server
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+

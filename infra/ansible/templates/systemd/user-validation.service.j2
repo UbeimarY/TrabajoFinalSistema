@@ -1,0 +1,13 @@
+[Unit]
+After=docker.service
+Requires=docker.service
+
+[Service]
+ExecStart=/usr/bin/docker run --rm --name user-validation-service --network host --env-file /opt/zero-trust/services/user-validation-service/service.env -v /opt/zero-trust/certs:/certs:ro zt/user-validation-service:local
+ExecStop=/usr/bin/docker stop user-validation-service
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+
