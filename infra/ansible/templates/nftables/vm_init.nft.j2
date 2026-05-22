@@ -16,9 +16,16 @@ table inet filter {
     type filter hook output priority 0; policy drop;
     oif "lo" accept
     ct state established,related accept
+    # DNS
+    udp dport 53 accept
+    tcp dport 53 accept
+    # Internet (apt, docker, github)
     tcp dport { 80, 443 } accept
-    tcp dport 443 ip daddr {{ hostvars['vm-auth'].private_ip }} accept
+    # Kafka
     tcp dport 9092 ip daddr {{ hostvars['vm-brokers'].private_ip }} accept
+    # RabbitMQ
+    tcp dport 5672 ip daddr {{ hostvars['vm-brokers'].private_ip }} accept
+    # Auth server
+    tcp dport 443 ip daddr {{ hostvars['vm-auth'].private_ip }} accept
   }
 }
-

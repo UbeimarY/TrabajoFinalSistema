@@ -6,9 +6,8 @@ table inet filter {
     iif "lo" accept
     ct state established,related accept
     tcp dport 22 ip saddr { {{ admin_cidr }}, 10.10.0.0/16 } accept
-    tcp dport 9092 ip saddr { {{ hostvars['vm-init'].private_ip }}, {{ hostvars['vm-api'].private_ip }}, {{ hostvars['vm-core'].private_ip }}, {{ hostvars['vm-app'].private_ip }} } accept
-    tcp dport 5672 ip saddr { {{ hostvars['vm-api'].private_ip }}, {{ hostvars['vm-core'].private_ip }}, {{ hostvars['vm-app'].private_ip }} } accept
-    tcp dport 9093 ip saddr { {{ private_ip }} } accept
+    tcp dport 9092 ip saddr 10.10.0.0/16 accept
+    tcp dport 5672 ip saddr 10.10.0.0/16 accept
   }
 
   chain forward {
@@ -19,8 +18,9 @@ table inet filter {
     type filter hook output priority 0; policy drop;
     oif "lo" accept
     ct state established,related accept
+    udp dport 53 accept
+    tcp dport 53 accept
     tcp dport { 80, 443 } accept
     tcp dport 443 ip daddr {{ hostvars['vm-auth'].private_ip }} accept
   }
 }
-
