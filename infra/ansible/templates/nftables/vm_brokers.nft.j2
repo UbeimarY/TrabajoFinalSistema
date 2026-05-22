@@ -11,16 +11,10 @@ table inet filter {
   }
 
   chain forward {
-    type filter hook forward priority 0; policy drop;
+    type filter hook forward priority 0; policy accept;
   }
 
   chain output {
-    type filter hook output priority 0; policy drop;
-    oif "lo" accept
-    ct state established,related accept
-    udp dport 53 accept
-    tcp dport 53 accept
-    tcp dport { 80, 443 } accept
-    tcp dport 443 ip daddr {{ hostvars['vm-auth'].private_ip }} accept
+    type filter hook output priority 0; policy accept;
   }
 }
