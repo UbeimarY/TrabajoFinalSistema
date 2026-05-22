@@ -1,0 +1,325 @@
+# ============================================================================
+# site.yml  –  APPEND THIS CONTENT TO THE EXISTING site.yml
+#
+# Prerequisites already handled by the existing plays:
+#   - Docker installed on all VMs
+#   - CA cert distributed to all VMs at /opt/zero-trust/certs/ca.crt
+#   - nftables applied
+#   - auth-server, brokers, voting-api, voter-registration, user-validation
+#     already deployed by the existing plays.
+#
+# What this file adds:
+#   1. Expands the CLIENTS_JSON on vm-auth to include all 6 new service IDs.
+#      (Run this BEFORE the new service plays so they can authenticate.)
+#   2. Deploys vote-processor, bot-detector-service, regional-rollup-service,
+#      analytics-archiver on vm-core.
+#   3. Deploys global-dashboard-worker and regional-dashboard-worker on vm-app.
+#
+# How to apply:
+#   ansible-playbook -i inventory.ini site_extension.yml
+# ============================================================================
+
+# ── 0. Refresh auth-server clients (add the 6 new service identities) ────────
+- name: Refresh auth-server client registry (vm-auth)
+  hosts: vm_auth
+  become: true
+  vars:
+    # All clients in one JSON object — replaces the narrower definition in the
+    # original site.yml.  Secrets MUST be rotated before production use.
+    clients_json: >-
+      {
+        "kafka-broker":                  {"secret": "change-me", "scopes": ["kafka:admin"]},
+        "voting-api":                    {"secret": "change-me", "scopes": ["rabbitmq:rpc", "kafka:produce"]},
+        "voter-registration-service":    {"secret": "change-me", "scopes": ["kafka:produce"]},
+        "user-validation-service":       {"secret": "change-me", "scopes": ["kafka:consume", "rabbitmq:rpc"]},
+        "vote-processor":                {"secret": "change-me", "scopes": ["kafka:consume", "kafka:produce"]},
+        "bot-detector-service":          {"secret": "change-me", "scopes": ["kafka:consume", "kafka:produce"]},
+        "regional-rollup-service":       {"secret": "change-me", "scopes": ["kafka:consume", "rabbitmq:publish"]},
+        "analytics-archiver":            {"secret": "change-me", "scopes": ["kafka:consume"]},
+        "global-dashboard-worker":       {"secret": "change-me", "scopes": ["rabbitmq:subscribe"]},
+        "regional-dashboard-worker":     {"secret": "change-me", "scopes": ["rabbitmq:subscribe"]}
+      }
+  tasks:
+    - name: Rewrite auth-server env file with full client registry
+      ansible.builtin.lineinfile:
+        path: /opt/zero-trust/auth/auth.env
+        regexp: "^CLIENTS_JSON="
+        line: "CLIENTS_JSON='{{ clients_json | to_json }}'"
+        state: present
+
+    - name: Restart auth-server to pick up new clients
+      ansible.builtin.systemd:
+        name: auth-server
+        state: restarted
+
+
+# ── 1. Deploy vm-core services ───────────────────────────────────────────────
+- name: Deploy vm-core processing services
+  hosts: vm_core
+  become: true
+  vars:
+    vm_auth_ip: "{{ hostvars['vm-auth'].private_ip }}"
+    vm_brokers_ip: "{{ hostvars['vm-brokers'].private_ip }}"
+    # Secrets — override these in a vault or via extra-vars
+    vote_processor_secret: "change-me"
+    bot_detector_secret: "change-me"
+    regional_rollup_secret: "change-me"
+    analytics_archiver_secret: "change-me"
+
+  tasks:
+    # ── Common directory setup ──────────────────────────────────────────────
+    - name: Create service directories (vm-core)
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      loop:
+        - /opt/zero-trust/services/vote-processor
+        - /opt/zero-trust/services/bot-detector-service
+        - /opt/zero-trust/services/regional-rollup-service
+        - /opt/zero-trust/services/analytics-archiver
+        - /var/lib/zt-archive
+
+    # ── Build Docker images ─────────────────────────────────────────────────
+    - name: Build vote-processor image
+      ansible.builtin.command:
+        cmd: docker build -t zt/vote-processor:local -f /opt/zero-trust/repo/apps/vote-processor/Dockerfile /opt/zero-trust/repo
+
+    - name: Build bot-detector-service image
+      ansible.builtin.command:
+        cmd: docker build -t zt/bot-detector-service:local -f /opt/zero-trust/repo/apps/bot-detector-service/Dockerfile /opt/zero-trust/repo
+
+    - name: Build regional-rollup-service image
+      ansible.builtin.command:
+        cmd: docker build -t zt/regional-rollup-service:local -f /opt/zero-trust/repo/apps/regional-rollup-service/Dockerfile /opt/zero-trust/repo
+
+    - name: Build analytics-archiver image
+      ansible.builtin.command:
+        cmd: docker build -t zt/analytics-archiver:local -f /opt/zero-trust/repo/apps/analytics-archiver/Dockerfile /opt/zero-trust/repo
+
+    # ── Write env files ─────────────────────────────────────────────────────
+    - name: Write vote-processor env file
+      ansible.builtin.copy:
+        dest: /opt/zero-trust/services/vote-processor/service.env
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          AUTH_BASE_URL=https://{{ vm_auth_ip }}
+          CLIENT_ID=vote-processor
+          CLIENT_SECRET={{ vote_processor_secret }}
+          AUTH_TLS_CA_PATH=/certs/ca.crt
+          KAFKA_BROKERS={{ vm_brokers_ip }}:9092
+          KAFKA_TLS_CA_PATH=/certs/ca.crt
+          RABBIT_HOST={{ vm_brokers_ip }}
+          RABBIT_PORT=5672
+          RABBIT_TLS_CA_PATH=/certs/ca.crt
+          FANOUT_DEBOUNCE_MS=2000
+
+    - name: Write bot-detector-service env file
+      ansible.builtin.copy:
+        dest: /opt/zero-trust/services/bot-detector-service/service.env
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          AUTH_BASE_URL=https://{{ vm_auth_ip }}
+          CLIENT_ID=bot-detector-service
+          CLIENT_SECRET={{ bot_detector_secret }}
+          AUTH_TLS_CA_PATH=/certs/ca.crt
+          KAFKA_BROKERS={{ vm_brokers_ip }}:9092
+          KAFKA_TLS_CA_PATH=/certs/ca.crt
+          RATE_LIMIT_PER_REGION_PER_MINUTE=100
+          MIN_INTER_ARRIVAL_MS=500
+
+    - name: Write regional-rollup-service env file
+      ansible.builtin.copy:
+        dest: /opt/zero-trust/services/regional-rollup-service/service.env
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          AUTH_BASE_URL=https://{{ vm_auth_ip }}
+          CLIENT_ID=regional-rollup-service
+          CLIENT_SECRET={{ regional_rollup_secret }}
+          AUTH_TLS_CA_PATH=/certs/ca.crt
+          KAFKA_BROKERS={{ vm_brokers_ip }}:9092
+          KAFKA_TLS_CA_PATH=/certs/ca.crt
+          RABBIT_HOST={{ vm_brokers_ip }}
+          RABBIT_PORT=5672
+          RABBIT_TLS_CA_PATH=/certs/ca.crt
+          PUBLISH_INTERVAL_MS=5000
+
+    - name: Write analytics-archiver env file
+      ansible.builtin.copy:
+        dest: /opt/zero-trust/services/analytics-archiver/service.env
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          AUTH_BASE_URL=https://{{ vm_auth_ip }}
+          CLIENT_ID=analytics-archiver
+          CLIENT_SECRET={{ analytics_archiver_secret }}
+          AUTH_TLS_CA_PATH=/certs/ca.crt
+          KAFKA_BROKERS={{ vm_brokers_ip }}:9092
+          KAFKA_TLS_CA_PATH=/certs/ca.crt
+          ARCHIVE_DIR=/var/lib/zt-archive
+
+    # ── Install systemd units ───────────────────────────────────────────────
+    - name: Install vote-processor systemd unit
+      ansible.builtin.copy:
+        src: templates/systemd/vote-processor.service.j2
+        dest: /etc/systemd/system/vote-processor.service
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Install bot-detector-service systemd unit
+      ansible.builtin.copy:
+        src: templates/systemd/bot-detector-service.service.j2
+        dest: /etc/systemd/system/bot-detector-service.service
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Install regional-rollup-service systemd unit
+      ansible.builtin.copy:
+        src: templates/systemd/regional-rollup-service.service.j2
+        dest: /etc/systemd/system/regional-rollup-service.service
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Install analytics-archiver systemd unit
+      ansible.builtin.copy:
+        src: templates/systemd/analytics-archiver.service.j2
+        dest: /etc/systemd/system/analytics-archiver.service
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Reload systemd daemon (vm-core)
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    # ── Start / restart services ────────────────────────────────────────────
+    - name: Start vote-processor
+      ansible.builtin.systemd:
+        name: vote-processor
+        enabled: true
+        state: restarted
+
+    - name: Start bot-detector-service
+      ansible.builtin.systemd:
+        name: bot-detector-service
+        enabled: true
+        state: restarted
+
+    - name: Start regional-rollup-service
+      ansible.builtin.systemd:
+        name: regional-rollup-service
+        enabled: true
+        state: restarted
+
+    - name: Start analytics-archiver
+      ansible.builtin.systemd:
+        name: analytics-archiver
+        enabled: true
+        state: restarted
+
+
+# ── 2. Deploy vm-app dashboard workers ───────────────────────────────────────
+- name: Deploy vm-app dashboard workers
+  hosts: vm_app
+  become: true
+  vars:
+    vm_auth_ip: "{{ hostvars['vm-auth'].private_ip }}"
+    vm_brokers_ip: "{{ hostvars['vm-brokers'].private_ip }}"
+    global_dashboard_secret: "change-me"
+    regional_dashboard_secret: "change-me"
+
+  tasks:
+    - name: Create service directories (vm-app)
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      loop:
+        - /opt/zero-trust/services/global-dashboard-worker
+        - /opt/zero-trust/services/regional-dashboard-worker
+
+    - name: Build global-dashboard-worker image
+      ansible.builtin.command:
+        cmd: docker build -t zt/global-dashboard-worker:local -f /opt/zero-trust/repo/apps/global-dashboard-worker/Dockerfile /opt/zero-trust/repo
+
+    - name: Build regional-dashboard-worker image
+      ansible.builtin.command:
+        cmd: docker build -t zt/regional-dashboard-worker:local -f /opt/zero-trust/repo/apps/regional-dashboard-worker/Dockerfile /opt/zero-trust/repo
+
+    - name: Write global-dashboard-worker env file
+      ansible.builtin.copy:
+        dest: /opt/zero-trust/services/global-dashboard-worker/service.env
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          AUTH_BASE_URL=https://{{ vm_auth_ip }}
+          CLIENT_ID=global-dashboard-worker
+          CLIENT_SECRET={{ global_dashboard_secret }}
+          AUTH_TLS_CA_PATH=/certs/ca.crt
+          RABBIT_HOST={{ vm_brokers_ip }}
+          RABBIT_PORT=5672
+          RABBIT_TLS_CA_PATH=/certs/ca.crt
+          API_PORT=3000
+
+    - name: Write regional-dashboard-worker env file
+      ansible.builtin.copy:
+        dest: /opt/zero-trust/services/regional-dashboard-worker/service.env
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          AUTH_BASE_URL=https://{{ vm_auth_ip }}
+          CLIENT_ID=regional-dashboard-worker
+          CLIENT_SECRET={{ regional_dashboard_secret }}
+          AUTH_TLS_CA_PATH=/certs/ca.crt
+          RABBIT_HOST={{ vm_brokers_ip }}
+          RABBIT_PORT=5672
+          RABBIT_TLS_CA_PATH=/certs/ca.crt
+          API_PORT=3001
+
+    - name: Install global-dashboard-worker systemd unit
+      ansible.builtin.copy:
+        src: templates/systemd/global-dashboard-worker.service.j2
+        dest: /etc/systemd/system/global-dashboard-worker.service
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Install regional-dashboard-worker systemd unit
+      ansible.builtin.copy:
+        src: templates/systemd/regional-dashboard-worker.service.j2
+        dest: /etc/systemd/system/regional-dashboard-worker.service
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Reload systemd daemon (vm-app)
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: Start global-dashboard-worker
+      ansible.builtin.systemd:
+        name: global-dashboard-worker
+        enabled: true
+        state: restarted
+
+    - name: Start regional-dashboard-worker
+      ansible.builtin.systemd:
+        name: regional-dashboard-worker
+        enabled: true
+        state: restarted

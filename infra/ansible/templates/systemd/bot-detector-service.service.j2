@@ -1,0 +1,18 @@
+[Unit]
+Description=Zero Trust – bot-detector-service
+After=docker.service
+Requires=docker.service
+
+[Service]
+ExecStart=/usr/bin/docker run --rm \
+  --name bot-detector-service \
+  --network host \
+  --env-file /opt/zero-trust/services/bot-detector-service/service.env \
+  -v /opt/zero-trust/certs:/certs:ro \
+  zt/bot-detector-service:local
+ExecStop=/usr/bin/docker stop bot-detector-service
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

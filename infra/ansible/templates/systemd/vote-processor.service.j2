@@ -1,0 +1,18 @@
+[Unit]
+Description=Zero Trust – vote-processor
+After=docker.service
+Requires=docker.service
+
+[Service]
+ExecStart=/usr/bin/docker run --rm \
+  --name vote-processor \
+  --network host \
+  --env-file /opt/zero-trust/services/vote-processor/service.env \
+  -v /opt/zero-trust/certs:/certs:ro \
+  zt/vote-processor:local
+ExecStop=/usr/bin/docker stop vote-processor
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

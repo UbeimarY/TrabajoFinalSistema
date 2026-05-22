@@ -1,0 +1,12 @@
+{
+  "name": "zero-trust-voting-platform",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm -w @zt/common run build && npm -w @zt/auth-server run build && npm -w @zt/voting-api run build && npm -w @zt/voter-registration-service run build && npm -w @zt/user-validation-service run build && npm -w @zt/vote-processor run build && npm -w @zt/bot-detector-service run build && npm -w @zt/regional-rollup-service run build && npm -w @zt/analytics-archiver run build && npm -w @zt/global-dashboard-worker run build && npm -w @zt/regional-dashboard-worker run build",
+    "typecheck": "npm -w @zt/common run typecheck && npm -w @zt/auth-server run typecheck && npm -w @zt/voting-api run typecheck && npm -w @zt/voter-registration-service run typecheck && npm -w @zt/user-validation-service run typecheck && npm -w @zt/vote-processor run typecheck && npm -w @zt/bot-detector-service run typecheck && npm -w @zt/regional-rollup-service run typecheck && npm -w @zt/analytics-archiver run typecheck && npm -w @zt/global-dashboard-worker run typecheck && npm -w @zt/regional-dashboard-worker run typecheck"
+  }
+}

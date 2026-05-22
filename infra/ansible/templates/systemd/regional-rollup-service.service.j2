@@ -1,0 +1,18 @@
+[Unit]
+Description=Zero Trust – regional-rollup-service
+After=docker.service
+Requires=docker.service
+
+[Service]
+ExecStart=/usr/bin/docker run --rm \
+  --name regional-rollup-service \
+  --network host \
+  --env-file /opt/zero-trust/services/regional-rollup-service/service.env \
+  -v /opt/zero-trust/certs:/certs:ro \
+  zt/regional-rollup-service:local
+ExecStop=/usr/bin/docker stop regional-rollup-service
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
