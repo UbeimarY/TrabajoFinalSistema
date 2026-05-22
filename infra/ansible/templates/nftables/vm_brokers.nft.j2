@@ -9,12 +9,17 @@ table inet filter {
     tcp dport 9092 ip saddr 10.10.0.0/16 accept
     tcp dport 5672 ip saddr 10.10.0.0/16 accept
   }
-
   chain forward {
     type filter hook forward priority 0; policy accept;
   }
-
   chain output {
     type filter hook output priority 0; policy accept;
+  }
+}
+
+table ip nat {
+  chain POSTROUTING {
+    type nat hook postrouting priority 100;
+    oif "ens5" masquerade;
   }
 }
