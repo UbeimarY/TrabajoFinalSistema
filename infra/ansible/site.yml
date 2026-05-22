@@ -139,7 +139,7 @@
 
     - name: Build auth-server image
       ansible.builtin.command:
-        cmd: docker build -t zt/auth-server:local -f /opt/zero-trust/repo/apps/auth-server/Dockerfile /opt/zero-trust/repo
+        cmd: docker build --network host -t zt/auth-server:local -f /opt/zero-trust/repo/apps/auth-server/Dockerfile /opt/zero-trust/repo
 
     - name: Write auth-server env file
       ansible.builtin.copy:
@@ -341,7 +341,7 @@
 
     - name: Build voting-api image
       ansible.builtin.command:
-        cmd: docker build -t zt/voting-api:local -f /opt/zero-trust/repo/apps/voting-api/Dockerfile /opt/zero-trust/repo
+        cmd: docker build --network host -t zt/voting-api:local -f /opt/zero-trust/repo/apps/voting-api/Dockerfile /opt/zero-trust/repo
 
     - name: Write voting-api env file
       ansible.builtin.copy:
@@ -402,7 +402,7 @@
 
     - name: Build voter-registration image
       ansible.builtin.command:
-        cmd: docker build -t zt/voter-registration-service:local -f /opt/zero-trust/repo/apps/voter-registration-service/Dockerfile /opt/zero-trust/repo
+        cmd: docker build --network host -t zt/voter-registration-service:local -f /opt/zero-trust/repo/apps/voter-registration-service/Dockerfile /opt/zero-trust/repo
 
     - name: Write voter-registration env file
       ansible.builtin.copy:
@@ -457,7 +457,7 @@
 
     - name: Build user-validation image
       ansible.builtin.command:
-        cmd: docker build -t zt/user-validation-service:local -f /opt/zero-trust/repo/apps/user-validation-service/Dockerfile /opt/zero-trust/repo
+        cmd: docker build --network host -t zt/user-validation-service:local -f /opt/zero-trust/repo/apps/user-validation-service/Dockerfile /opt/zero-trust/repo
 
     - name: Write user-validation env file
       ansible.builtin.copy:
